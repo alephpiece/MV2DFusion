@@ -296,6 +296,7 @@ class FSDV2Head(SparseClusterHead):
             cls_id = self.class_names.index(name)
             this_cls_mask = gt_labels_3d == cls_id
             out_gt_bboxes_list.append(gt_bboxes_3d[this_cls_mask])
+            # out_gt_bboxes_list.append(gt_bboxes_3d[this_cls_mask.to(gt_bboxes_3d.device)])
             out_labels_list.append(gt_labels_3d.new_ones(this_cls_mask.sum()) * i)
         out_gt_bboxes_3d = gt_bboxes_3d.cat(out_gt_bboxes_list)
         out_labels = torch.cat(out_labels_list, dim=0)
@@ -351,6 +352,7 @@ class FSDV2Head(SparseClusterHead):
             return labels, label_weights, bbox_targets, bbox_weights, iou_labels
 
         valid_gt_mask = gt_labels_3d >= 0
+        # valid_gt_mask = (gt_labels_3d >= 0).to(gt_bboxes_3d.device)
         gt_bboxes_3d = gt_bboxes_3d[valid_gt_mask]
         gt_labels_3d = gt_labels_3d[valid_gt_mask]
 

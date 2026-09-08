@@ -27,6 +27,27 @@ from mmdet.apis import set_random_seed
 from mmseg import __version__ as mmseg_version
 from mmcv.utils import TORCH_VERSION, digit_version
 
+
+import random
+import argparse
+import datetime
+import json
+import numpy as np
+import time
+import torch
+import torch.nn as nn
+
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # 所有 GPU
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -97,6 +118,9 @@ def parse_args():
 
 
 def main():
+    # torch.backends.cudnn.benchmark = True
+    # torch._inductor.config.force_disable_caches = True
+
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
@@ -224,6 +248,8 @@ def main():
         train_cfg=cfg.get('train_cfg'),
         test_cfg=cfg.get('test_cfg'))
 
+    # model = torch.compile(model)
+
     model.init_weights()
 
     if cfg.get('SyncBN', False):
@@ -258,6 +284,7 @@ def main():
             if hasattr(datasets[0], 'PALETTE') else None)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    
 
     from projects.mmdet3d_plugin.core.apis.train import custom_train_model
     custom_train_model(
@@ -272,4 +299,5 @@ def main():
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('fork', force=True)
+    set_seed(42)
     main()

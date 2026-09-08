@@ -290,12 +290,17 @@ class CustomNuScenesDataset(NuScenesDataset):
         for key in ['proposals']:
             if key in queue[-1]:
                 queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
+        '''
         if not self.test_mode:
             for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths']:
                 if key == 'gt_bboxes_3d':
                     queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
                 else:
                     queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
+        '''
+        if not self.test_mode:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths']:
+                queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
 
         queue = queue[-1]
         return queue

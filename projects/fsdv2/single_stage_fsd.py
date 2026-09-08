@@ -312,6 +312,7 @@ class VoteSegmentor(Base3DSegmentor):
         pts_coors = pts_coors[valid_pts_mask]
         labels = labels[valid_pts_mask]
         vote_targets = vote_targets[valid_pts_mask]
+        vote_mask = vote_mask.to(valid_pts_mask.device)
         vote_mask = vote_mask[valid_pts_mask]
 
         assert feats.size(0) == labels.size(0)

@@ -213,7 +213,7 @@ class ConvNeXtBlock(BaseModule):
         return x
 
 
-@BACKBONES.register_module()
+@BACKBONES.register_module(force=True)
 class ConvNeXt(BaseModule):
     """ConvNeXt v1&v2 backbone.
 

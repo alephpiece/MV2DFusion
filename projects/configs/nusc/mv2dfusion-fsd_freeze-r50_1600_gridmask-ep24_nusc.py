@@ -77,7 +77,7 @@ model = dict(
         frozen_stages=-1,
         norm_cfg=dict(type='BN2d', requires_grad=False),
         norm_eval=True,
-        with_cp=True,
+        with_cp=False,
         style='pytorch'),
     img_neck=dict(
         init_cfg=dict(
@@ -452,7 +452,7 @@ model = dict(
                     ],
                     feedforward_channels=2048,
                     ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
+                    with_cp=False,  ###use checkpoint to save memory
                     operation_order=(
                         'self_attn', 'norm',
                         'cross_attn', 'norm',
@@ -508,7 +508,7 @@ ida_aug_conf = {
 }
 
 dataset_type = 'CustomNuScenesDataset'
-data_root = './data/nuscenes/'
+data_root = '/workspace/MV2DFusion/data/nuscenes/'
 
 train_pipeline = [
     dict(
@@ -593,7 +593,7 @@ test_pipeline = [
 
 data = dict(
     samples_per_gpu=batch_size,
-    workers_per_gpu=4,
+    workers_per_gpu=6,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -644,6 +644,8 @@ optimizer_config = dict(
     type='Fp16OptimizerHook', loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2))
 
+# optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+
 # learning policy
 lr_config = dict(
     policy='CosineAnnealing',
@@ -653,7 +655,19 @@ lr_config = dict(
     min_lr_ratio=1e-3,
 )
 
-custom_hooks = []
+custom_hooks = [
+    # dict(
+    #     type='ProfilerHook',
+    #     by_epoch=False,
+    #     profile_iters=5,
+    #     activities=['cpu', 'cuda'],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True,
+    #     with_flops=True,
+    #     json_trace_path='./profiler/BW150_all_gpu_5iter_flashattn.json',
+    # )
+]
 
 evaluation = dict(interval=3 * num_iters_per_epoch, pipeline=test_pipeline)
 checkpoint_config = dict(interval=1 * num_iters_per_epoch)

@@ -222,7 +222,9 @@ class VoteSegHead(Base3DDecodeHead):
             bbox_labels = gt_labels_list[i]
 
             # if self.num_classes < 3: # I don't know why there are some -1 labels when train car-only model.
+            
             valid_gt_mask = bbox_labels >= 0
+            # valid_gt_mask = (bbox_labels >= 0).to(bboxes.device)
             bboxes = bboxes[valid_gt_mask]
             bbox_labels = bbox_labels[valid_gt_mask]
             
@@ -260,7 +262,7 @@ class VoteSegHead(Base3DDecodeHead):
         return class_labels
 
     def get_vote_target(self, inbox_inds, points, bboxes):
-
+        inbox_inds = inbox_inds.to(bboxes.device)
         bg_mask = inbox_inds < 0
         if self.train_cfg.get('centroid_offset', False):
             centroid, _, inv = scatter_v2(points, inbox_inds, mode='avg', return_inv=True)

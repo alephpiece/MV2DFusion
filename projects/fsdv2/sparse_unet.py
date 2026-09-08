@@ -332,10 +332,14 @@ class FSDSparseUNet(BaseModule):
             :obj:`SparseConvTensor`: Upsampled feature.
         """
         x = lateral_layer(x_lateral)
-        x = x.replace_feature(torch.cat((x_bottom.features, x.features), dim=1))
+        x = replace_feature(x, torch.cat((x_bottom.features, x.features), dim=1))
         x_merge = merge_layer(x)
         x = self.reduce_channel(x, x_merge.features.shape[1])
-        x = x.replace_feature(x_merge.features + x.features)
+        if hasattr(x, 'replace_feature'):
+            x = x.replace_feature(x_merge.features + x.features)
+        elif hasattr(x, 'features'):
+            x.features = x_merge.features + x.features
+        #x = x.replace_feature(x_merge.features + x.features)
         x = upsample_layer(x)
         return x
 
@@ -356,7 +360,11 @@ class FSDSparseUNet(BaseModule):
         assert (in_channels % out_channels
                 == 0) and (in_channels >= out_channels)
 
-        x = x.replace_feature(features.view(n, out_channels, -1).sum(dim=2))
+        # x = replace_feature(x, features.view(n, out_channels, -1).sum(dim=2))
+        if hasattr(x, 'replace_feature'):
+            x = x.replace_feature(features.view(n, out_channels, -1).sum(dim=2))
+        elif hasattr(x, 'features'):
+            x.features = features.view(n, out_channels, -1).sum(dim=2)
         return x
 
     def make_encoder_layers(self, make_block, norm_cfg, in_channels):
@@ -640,19 +648,54 @@ class VirtualVoxelMixer(FSDSparseUNet):
         if self.ndim == 2:
             assert (coors[:, 1] == 0).all()
             coors = coors[:, [0, 2, 3]] # remove the z-axis indices
+        # print(f"Input coors shape: {coors.shape}")
+        # print(f"Input unique coors: {torch.unique(coors, dim=0).shape}")
+
         if self.keep_coors_dims is not None:
             coors = coors[:, self.keep_coors_dims]
         coors = coors.int()
+
         voxel_features = voxel_features.float()
         input_sp_tensor = SparseConvTensor(voxel_features, coors,
                                                   self.sparse_shape,
                                                   batch_size)
+
+        # print(f"Sparse tensor info:")
+        # print(f"  - features shape: {input_sp_tensor.features.shape}")
+        # print(f"  - indices shape: {input_sp_tensor.indices.shape}")
+        # print(f"  - spatial_shape: {input_sp_tensor.spatial_shape}")
+        # print(f"  - batch size: {input_sp_tensor.batch_size}")
+        #
+        # # 检查坐标范围
+        # print(f"coors range: z=[{coors[:, 1].min()}, {coors[:, 1].max()}], "
+        #       f"y=[{coors[:, 2].min()}, {coors[:, 2].max()}], "
+        #       f"x=[{coors[:, 3].min()}, {coors[:, 3].max()}]")
+        # print(f"sparse_shape: {self.sparse_shape}")
+        #
+        # # 检查是否有坐标超出范围
+        # valid = (coors[:, 1] >= 0) & (coors[:, 1] < self.sparse_shape[0]) & \
+        #         (coors[:, 2] >= 0) & (coors[:, 2] < self.sparse_shape[1]) & \
+        #         (coors[:, 3] >= 0) & (coors[:, 3] < self.sparse_shape[2])
+        # if not valid.all():
+        #     print(f"⚠️ 发现 {valid.sum()} 个有效点，{coors.shape[0] - valid.sum()} 个超出范围")
+        #
+        # # 检查SubMConv是否真的保持点数
+        # x = self.conv_input(input_sp_tensor)
+        # print(f"After conv_input: {x.features.shape[0]} points")
+        #
+        # if x.features.shape[0] != input_sp_tensor.features.shape[0]:
+        #     print(f"⚠️ conv_input 丢失了 {input_sp_tensor.features.shape[0] - x.features.shape[0]} 个点")
+
+
+
         x = self.conv_input(input_sp_tensor)
+        # print(f"After conv_input: {x.features.shape[0]} points")
 
         encode_features = []
         for encoder_layer in self.encoder_layers:
             x = encoder_layer(x)
             encode_features.append(x)
+            # print(f"After encoder_{id}: {x.features.shape[0]} points")
 
         x = encode_features[-1]
         for i in range(self.stage_num, 0, -1):
@@ -661,6 +704,8 @@ class VirtualVoxelMixer(FSDSparseUNet):
                                            getattr(self, f'merge_layer{i}'),
                                            getattr(self, f'upsample_layer{i}'))
             # decode_features.append(x)
+            # print(f"After decoder_{i}: {x.features.shape[0]} points")
         x = self.conv_out(x)
+        # print(f"After conv_out: {x.features.shape[0]} points")
 
         return x.features, x.indices, x.spatial_shape

@@ -133,6 +133,13 @@ class SingleStageFSDV2(SingleStage3DDetector):
         res_coors = torch.div(points[:, :3] - pc_range[None, :3], voxel_size[None, :], rounding_mode='floor').long()
         res_coors = res_coors[:, [2, 1, 0]] # to zyx order
 
+        # # ===== 裁剪到有效范围 =====
+        # # 从 backbone 获取 sparse_shape
+        # sparse_shape = self.backbone.sparse_shape
+        # res_coors[:, 0] = res_coors[:, 0].clamp(0, sparse_shape[0] - 1)
+        # res_coors[:, 1] = res_coors[:, 1].clamp(0, sparse_shape[1] - 1)
+        # res_coors[:, 2] = res_coors[:, 2].clamp(0, sparse_shape[2] - 1)
+
         coors_batch = torch.cat([batch_idx[:, None], res_coors], dim=1)
 
         return coors_batch
@@ -170,6 +177,7 @@ class SingleStageFSDV2(SingleStage3DDetector):
         else:
             raise NotImplementedError
 
+
     def extract_feat(self, sampled_dict, origin_dict, gt_bboxes_3d=None, multiscale_features=None):
         """Extract features from points."""
         if self.baseline_mode:
@@ -184,7 +192,6 @@ class SingleStageFSDV2(SingleStage3DDetector):
 
         # the predicted centers might be out-of-range
         sampled_centers = self.clip_points(sampled_centers, self.point_cloud_range)
-        # sampled_centers
 
         offset = (sampled_centers - sampled_pts[:, :3]) / 10 # hardcode a normalizer
         proj_input = torch.cat([sampled_feats, offset, sampled_logits, sampled_pts[:, 3:]], 1)
@@ -194,6 +201,11 @@ class SingleStageFSDV2(SingleStage3DDetector):
             vir_pts_feat = vir_pts_feat * 0
 
         ori_pts = origin_dict['seg_points']
+
+        # add: 对原始点也进行裁剪
+        ori_pts[:, :3] = self.clip_points(ori_pts[:, :3], self.point_cloud_range)
+
+
         ori_batch_idx = origin_dict['batch_idx']
         ori_pts_feat = origin_dict['seg_feats']
         ori_pts_feat = self.ori_proj(ori_pts_feat)
@@ -290,6 +302,242 @@ class SingleStageFSDV2(SingleStage3DDetector):
             out_dict['pts_batch_inds'] = cat_batch_idx
 
         return out_dict
+
+    '''
+    # 针对decoder layer输出长度不一致，重新获取index，较为复杂。根因为体素出现-1，更建议用上面的函数，对超边界体素clip。
+    def extract_feat(self, sampled_dict, origin_dict, gt_bboxes_3d=None, multiscale_features=None):
+        """Extract features from points."""
+        if self.baseline_mode:
+            return self.extract_feat_baseline(sampled_dict, origin_dict, gt_bboxes_3d, multiscale_features)
+
+        sampled_pts = sampled_dict['seg_points']
+        sampled_centers = sampled_dict['center_preds']
+        sampled_logits = sampled_dict['seg_logits']
+        sampled_feats = sampled_dict['seg_feats']
+        sampled_batch_idx = sampled_dict['batch_idx']
+        device = sampled_pts.device
+
+        # the predicted centers might be out-of-range
+        sampled_centers = self.clip_points(sampled_centers, self.point_cloud_range)
+
+        offset = (sampled_centers - sampled_pts[:, :3]) / 10  # hardcode a normalizer
+        proj_input = torch.cat([sampled_feats, offset, sampled_logits, sampled_pts[:, 3:]], 1)
+        vir_pts_feat = self.virtual_proj(proj_input)
+
+        if self.zero_virtual_feature:
+            vir_pts_feat = vir_pts_feat * 0
+
+        ori_pts = origin_dict['seg_points']
+        ori_batch_idx = origin_dict['batch_idx']
+        ori_pts_feat = origin_dict['seg_feats']
+        ori_pts_feat = self.ori_proj(ori_pts_feat)
+
+        cat_pts = torch.cat([ori_pts[:, :3], sampled_centers], 0)
+        cat_feat = torch.cat([ori_pts_feat, vir_pts_feat], 0)
+        cat_batch_idx = torch.cat([ori_batch_idx, sampled_batch_idx], 0)
+
+        coors = self.voxelize_with_batch_idx(cat_pts, cat_batch_idx)
+
+        voxel_encoder_input = torch.cat([cat_pts, cat_feat], 1)
+        voxel_feats, voxel_coors, unq_inv = self.voxel_encoder(voxel_encoder_input, coors, return_inv=True)
+
+        pts_indicators = torch.cat(
+            [
+                torch.zeros(len(ori_pts), device=device, dtype=torch.float),
+                torch.ones(len(sampled_centers), device=device, dtype=torch.float)
+            ]
+        )
+        voxel_indicators, scatter_coors = scatter_v2(pts_indicators, coors, mode='avg', return_inv=False)
+        assert (scatter_coors == voxel_coors).all()
+        virtual_mask = voxel_indicators > 0
+
+        batch_size = voxel_coors[:, 0].max().item() + 1
+
+        # ===== 保存原始信息用于后续匹配 =====
+        original_voxel_coors_before_fusion = voxel_coors.clone()
+        original_virtual_mask = virtual_mask.clone()
+        original_cat_pts = cat_pts.clone()  # 保存用于 centroid 计算
+        original_cat_batch_idx = cat_batch_idx.clone()
+        original_coors = coors.clone()  # 保存原始的 coors
+        original_len_before_fusion = len(voxel_feats)
+        # print(f"[DEBUG] Before multiscale_fusion: voxel_feats length = {original_len_before_fusion}")
+
+        # ===== 多尺度特征融合 =====
+        if multiscale_features is not None:
+            voxel_feats, voxel_coors, _ = self.multiscale_fusion(
+                multiscale_features, voxel_feats, voxel_coors
+            )
+            # print(f"[DEBUG] After multiscale_fusion: voxel_feats length = {len(voxel_feats)}")
+
+        if self.only_virtual:
+            assert multiscale_features is None
+            voxel_feats = voxel_feats[virtual_mask]
+            voxel_coors = voxel_coors[virtual_mask]
+
+        # ===== Backbone =====
+        out_voxel_feats, out_coors, sparse_shape = self.backbone(voxel_feats, voxel_coors, batch_size)
+        # print(f"[DEBUG] After backbone: out_voxel_feats length = {len(out_voxel_feats)}")
+
+        # ===== 在 backbone 之后重新生成 singlescale_mask =====
+        if multiscale_features is not None:
+            def encode_coords(coords):
+                scale = torch.tensor([1, 1000000, 1000000000, 1000000000000],
+                                     device=coords.device, dtype=torch.int64)
+                return (coords.long() * scale).sum(dim=1)
+
+            orig_coords_encoded = encode_coords(original_voxel_coors_before_fusion)
+            out_coords_encoded = encode_coords(out_coors)
+
+            is_original = torch.isin(out_coords_encoded, orig_coords_encoded)
+            singlescale_mask = is_original
+
+            dropped_count = original_len_before_fusion - singlescale_mask.sum().item()
+            if dropped_count > 0:
+                print(
+                    f"[INFO] Backbone dropped {dropped_count} voxels (N: {original_len_before_fusion} -> {singlescale_mask.sum().item()})")
+
+            out_voxel_feats = out_voxel_feats[singlescale_mask]
+            out_coors = out_coors[singlescale_mask]
+
+            # print(f"[DEBUG] After applying mask: out_voxel_feats length = {len(out_voxel_feats)}")
+
+        # ===== 重新生成 virtual_mask =====
+        if multiscale_features is not None:
+            def encode_coords(coords):
+                scale = torch.tensor([1, 1000000, 1000000000, 1000000000000],
+                                     device=coords.device, dtype=torch.int64)
+                return (coords.long() * scale).sum(dim=1)
+
+            orig_virtual_coors = original_voxel_coors_before_fusion[original_virtual_mask]
+            orig_virtual_encoded = encode_coords(orig_virtual_coors)
+
+            out_coords_encoded = encode_coords(out_coors)
+            is_virtual = torch.isin(out_coords_encoded, orig_virtual_encoded)
+            virtual_mask = is_virtual
+
+            # 对齐长度
+            if len(virtual_mask) != len(out_voxel_feats):
+                if len(virtual_mask) > len(out_voxel_feats):
+                    virtual_mask = virtual_mask[:len(out_voxel_feats)]
+                else:
+                    pad = torch.zeros(len(out_voxel_feats) - len(virtual_mask),
+                                      dtype=torch.bool, device=virtual_mask.device)
+                    virtual_mask = torch.cat([virtual_mask, pad], dim=0)
+
+            # print(f"[DEBUG] Re-generated virtual_mask: {virtual_mask.sum()} virtual voxels out of {len(virtual_mask)}")
+
+        # ===== get voxel center xyz =====
+        voxel_size = torch.tensor(self.virtual_voxel_size, device=device)
+        pc_range = torch.tensor(self.point_cloud_range, device=device)
+        voxel_centers = (out_coors[:, [3, 2, 1]] + 0.5) * voxel_size[None, :] + pc_range[None, :3]
+
+        out_voxel_dict = {
+            'out_voxel_feats': out_voxel_feats,
+            'out_coors': out_coors,
+            'out_centers': voxel_centers,
+        }
+
+        # ===== 应用 virtual_mask =====
+        if self.only_virtual:
+            virtual_voxel_feats = out_voxel_feats
+            virtual_coors = out_coors
+            virtual_centers = voxel_centers
+        else:
+            if len(virtual_mask) != len(out_voxel_feats):
+                if len(virtual_mask) > len(out_voxel_feats):
+                    virtual_mask = virtual_mask[:len(out_voxel_feats)]
+                else:
+                    pad = torch.zeros(len(out_voxel_feats) - len(virtual_mask),
+                                      dtype=torch.bool, device=virtual_mask.device)
+                    virtual_mask = torch.cat([virtual_mask, pad], dim=0)
+
+            virtual_voxel_feats = out_voxel_feats[virtual_mask]
+            virtual_coors = out_coors[virtual_mask]
+            virtual_centers = voxel_centers[virtual_mask]
+
+        out_dict = dict(
+            virtual_feats=virtual_voxel_feats,
+            virtual_coors=virtual_coors,
+            virtual_centers=virtual_centers,
+            sparse_shape=sparse_shape,
+        )
+        out_dict.update(out_voxel_dict)
+
+        if self.training:
+            self.print_info['num_virtual'] = virtual_voxel_feats.new_ones(1) * len(virtual_voxel_feats)
+
+            # ===== 修复：使用 out_coors 而不是原始 coors 来计算 centroid =====
+            # 因为 backbone 可能会改变坐标，所以需要使用 backbone 输出的坐标
+            # 但是 scatter_v2 需要输入和坐标长度一致
+            # 我们需要将 cat_pts 映射到 out_coors 上
+
+            # 这里我们使用原始的 voxel_centroid 计算方式，但使用 out_coors
+            # 通过坐标匹配，找到 out_coors 对应的原始 coors 索引
+
+            def encode_coords(coords):
+                scale = torch.tensor([1, 1000000, 1000000000, 1000000000000],
+                                     device=coords.device, dtype=torch.int64)
+                return (coords.long() * scale).sum(dim=1)
+
+            # 编码原始 coors
+            orig_coors_encoded = encode_coords(original_coors)
+
+            # 编码 out_coors
+            out_coors_encoded = encode_coords(out_coors)
+
+            # 找到 out_coors 对应的原始 coors 索引
+            # 注意：由于 backbone 可能改变坐标，不是所有 out_coors 都在原始 coors 中
+            # 但至少在 singlescale_mask 为 True 的那些坐标是匹配的
+
+            # 如果你需要 centroid 用于其他用途，可以在这里添加逻辑
+            # 但为了快速修复，我们创建一个 dummy centroid
+            if multiscale_features is not None:
+                # 使用 virtual_centers 作为 centroid
+                voxel_centroid = virtual_centers.clone()
+            else:
+                # 没有 multiscale_features 时，使用原始计算方式
+                alpha = self.train_cfg.get('centroid_alpha', None)
+                if alpha is not None:
+                    gt_fg_mask = self.get_batched_gt_fg_mask(cat_pts[:, :3], cat_batch_idx, gt_bboxes_3d)
+                    alpha_mask = (~gt_fg_mask).float() * alpha + gt_fg_mask.float()
+                    sum_centroid, _ = scatter_v2(alpha_mask[:, None] * cat_pts[:, :3], coors, mode='sum',
+                                                 return_inv=False)
+                    sum_alpha, _ = scatter_v2(alpha_mask[:, None], coors, mode='sum', return_inv=False)
+                    assert (sum_alpha >= alpha).all()
+                    voxel_centroid = sum_centroid / sum_alpha
+                else:
+                    voxel_centroid, _ = scatter_v2(cat_pts[:, :3], coors, mode='avg', return_inv=False)
+
+                # 使用 virtual_mask 筛选
+                if len(virtual_mask) != len(voxel_centroid):
+                    if len(virtual_mask) > len(voxel_centroid):
+                        virtual_mask = virtual_mask[:len(voxel_centroid)]
+                    else:
+                        pad = torch.zeros(len(voxel_centroid) - len(virtual_mask),
+                                          dtype=torch.bool, device=virtual_mask.device)
+                        virtual_mask = torch.cat([virtual_mask, pad], dim=0)
+
+                voxel_centroid = voxel_centroid[virtual_mask]
+
+            out_dict['virtual_centroid'] = voxel_centroid
+
+            # 由于坐标可能不完全匹配，这里使用更宽松的检查
+            # 或者跳过这个 assert
+            # assert ((voxel_centroid - virtual_centers).abs() < voxel_size / 2 + 1e-3).all()
+            # print(f"[DEBUG] virtual_centers length: {len(virtual_centers)}, voxel_centroid length: {len(voxel_centroid)}")
+
+        if self.as_rpn:
+            # need pts information for GroupCorrection
+            out_pts_feats = self.recover_point_features(out_voxel_feats, out_coors, sparse_shape, cat_pts,
+                                                        cat_batch_idx, voxel_coors, unq_inv)
+            out_dict['pts_feats'] = out_pts_feats
+            out_dict['pts_xyz'] = cat_pts
+            out_dict['pts_indicators'] = pts_indicators
+            out_dict['pts_batch_inds'] = cat_batch_idx
+
+        return out_dict
+    '''
+    
 
     def extract_feat_baseline(self, sampled_dict, origin_dict, gt_bboxes_3d=None, multiscale_features=None):
         """Extract features from points."""
@@ -411,6 +659,19 @@ class SingleStageFSDV2(SingleStage3DDetector):
         out_indicators, _ = scatter_v2(indicators, cat_coors, mode='max', return_inv=False)
         out_indicators = out_indicators.squeeze()
 
+        # # ============ 修复点 ============
+        # # 在 FP16 下，使用阈值比较代替精确相等
+        # if voxel_feats.dtype == torch.float16:
+        #     # 转换为 FP32 进行比较
+        #     out_indicators_float = out_indicators.float()
+        #     singlescale_mask = out_indicators_float > 0.5  # 使用阈值
+        # else:
+        #     singlescale_mask = out_indicators == 1
+        #
+        # # 确保 mask 长度正确
+        # assert singlescale_mask.sum() == len(voxel_feats), \
+        #     f"Mask sum {singlescale_mask.sum()} != {len(voxel_feats)}"
+
         singlescale_mask = out_indicators == 1
         assert singlescale_mask.sum() == len(voxel_feats)
 
@@ -465,7 +726,9 @@ class SingleStageFSDV2(SingleStage3DDetector):
             self.runtime_info = runtime_info # stupid way to get arguements from children class
         losses = {}
         gt_bboxes_3d = [b[l>=0] for b, l in zip(gt_bboxes_3d, gt_labels_3d)]
+        #gt_bboxes_3d = [b[(l >= 0).to(b.device)] for b, l in zip(gt_bboxes_3d, gt_labels_3d)]
         gt_labels_3d = [l[l>=0] for l in gt_labels_3d]
+        #gt_labels_3d = [l[(l>=0).to(l.device)] for l in gt_labels_3d]
 
         bsz = len(points)
 
