@@ -537,7 +537,7 @@ class SingleStageFSDV2(SingleStage3DDetector):
 
         return out_dict
     '''
-    
+
 
     def extract_feat_baseline(self, sampled_dict, origin_dict, gt_bboxes_3d=None, multiscale_features=None):
         """Extract features from points."""

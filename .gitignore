@@ -1,0 +1,27 @@
+# Python cache/runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local backup and debug artifacts
+*.bak
+*.bak_*
+*.py.org
+projects/configs/nusc/*_debug.py
+
+# Local run outputs
+work_dirs/
+log/
+logs/
+*.log
+*.pt
+
+# Build/editor noise
+build/
+dist/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+
+working-dir/

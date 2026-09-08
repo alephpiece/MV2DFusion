@@ -284,7 +284,7 @@ def main():
             if hasattr(datasets[0], 'PALETTE') else None)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
-    
+
 
     from projects.mmdet3d_plugin.core.apis.train import custom_train_model
     custom_train_model(

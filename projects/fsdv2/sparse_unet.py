@@ -335,11 +335,7 @@ class FSDSparseUNet(BaseModule):
         x = replace_feature(x, torch.cat((x_bottom.features, x.features), dim=1))
         x_merge = merge_layer(x)
         x = self.reduce_channel(x, x_merge.features.shape[1])
-        if hasattr(x, 'replace_feature'):
-            x = x.replace_feature(x_merge.features + x.features)
-        elif hasattr(x, 'features'):
-            x.features = x_merge.features + x.features
-        #x = x.replace_feature(x_merge.features + x.features)
+        x = replace_feature(x, x_merge.features + x.features)
         x = upsample_layer(x)
         return x
 
@@ -360,11 +356,7 @@ class FSDSparseUNet(BaseModule):
         assert (in_channels % out_channels
                 == 0) and (in_channels >= out_channels)
 
-        # x = replace_feature(x, features.view(n, out_channels, -1).sum(dim=2))
-        if hasattr(x, 'replace_feature'):
-            x = x.replace_feature(features.view(n, out_channels, -1).sum(dim=2))
-        elif hasattr(x, 'features'):
-            x.features = features.view(n, out_channels, -1).sum(dim=2)
+        x = replace_feature(x, features.view(n, out_channels, -1).sum(dim=2))
         return x
 
     def make_encoder_layers(self, make_block, norm_cfg, in_channels):

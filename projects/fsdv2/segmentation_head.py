@@ -222,7 +222,7 @@ class VoteSegHead(Base3DDecodeHead):
             bbox_labels = gt_labels_list[i]
 
             # if self.num_classes < 3: # I don't know why there are some -1 labels when train car-only model.
-            
+
             valid_gt_mask = bbox_labels >= 0
             # valid_gt_mask = (bbox_labels >= 0).to(bboxes.device)
             bboxes = bboxes[valid_gt_mask]

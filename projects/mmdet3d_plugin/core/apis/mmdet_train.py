@@ -40,7 +40,7 @@ def print_hook(module, input, output):
     """打印每层的输入、权重和输出前10个数"""
     print(f"\n{module.__class__.__name__} ({module.__class__.__name__}):")
     print("=" * 60)
-    
+
     # 1. 打印输入信息
     if input is not None and len(input) > 0:
         if isinstance(input[0], torch.Tensor):
@@ -56,7 +56,7 @@ def print_hook(module, input, output):
             print(f"  Input type: {type(input[0])}")
     else:
         print("  No input")
-    
+
     # 2. 打印权重信息（如果模块有权重）
     if hasattr(module, 'weight') and module.weight is not None:
         weight_tensor = module.weight
@@ -67,7 +67,7 @@ def print_hook(module, input, output):
         for i, val in enumerate(weight_values):
             print(f"{val:.5f}", end=" ")
         print()
-        
+
         # 如果有偏置项，也打印
         if hasattr(module, 'bias') and module.bias is not None:
             bias_tensor = module.bias
@@ -78,7 +78,7 @@ def print_hook(module, input, output):
             for i, val in enumerate(bias_values):
                 print(f"{val:.5f}", end=" ")
             print()
-    
+
     # 3. 打印输出信息
     if isinstance(output, torch.Tensor):
         flat_output = output.flatten()
@@ -88,7 +88,7 @@ def print_hook(module, input, output):
         for i, val in enumerate(output_values):
             print(f"{val:.5f}", end=" ")
         print()
-    
+
     # 4. 打印计算量信息
     if isinstance(module, nn.Conv2d):
         # 对于卷积层，计算FLOPs
@@ -97,16 +97,16 @@ def print_hook(module, input, output):
             out_shape = output.shape
             kernel_size = module.kernel_size
             groups = module.groups
-            
+
             if isinstance(kernel_size, int):
                 kernel_size = (kernel_size, kernel_size)
-            
+
             # 计算FLOPs
-            flops = (2 * out_shape[1] * out_shape[2] * out_shape[3] * 
+            flops = (2 * out_shape[1] * out_shape[2] * out_shape[3] *
                     in_shape[1] // groups * kernel_size[0] * kernel_size[1])
             print(f"  FLOPs: {flops:,}")
             print(f"  Groups: {groups}")
-    
+
     return output
 
 
@@ -133,7 +133,7 @@ def custom_train_detector(model,
                    meta=None):
     logger = get_root_logger(cfg.log_level)
 
-    
+
     # prepare data loaders
    
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
