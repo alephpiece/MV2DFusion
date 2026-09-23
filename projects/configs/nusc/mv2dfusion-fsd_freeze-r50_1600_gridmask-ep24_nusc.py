@@ -645,6 +645,11 @@ optimizer_config = dict(
     type='Fp16OptimizerHook', loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2))
 
+# fp32-math uses FP32 attention in six decoder FlashAttention modules during
+# training and evaluation. It requires Float Q/KV, no mask/causality/dropout,
+# and matmul TF32 disabled. The default remains native attention.
+flash_attention_backend = None
+
 # optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
 # learning policy

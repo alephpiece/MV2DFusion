@@ -132,6 +132,11 @@ def custom_train_detector(model,
                    eval_model=None,
                    meta=None):
     logger = get_root_logger(cfg.log_level)
+    flash_backend = cfg.get('flash_attention_backend', None)
+    if flash_backend not in (None, 'fp32-math'):
+        raise ValueError(f'unsupported flash_attention_backend: {flash_backend!r}')
+    if flash_backend is not None and eval_model is not None:
+        raise ValueError('flash_attention_backend with a separate eval_model is not supported')
 
 
     # prepare data loaders
@@ -298,9 +303,25 @@ def custom_train_detector(model,
             hook = build_from_cfg(hook_cfg, HOOKS)
             runner.register_hook(hook, priority=priority)
 
+    attention_precision_hook = None
+    if flash_backend == 'fp32-math':
+        from projects.mmdet3d_plugin.core.hook.attention_precision import FlashFP32Hook
+        attention_precision_hook = FlashFP32Hook()
+        runner.register_hook(attention_precision_hook, priority='LOW')
+
     if cfg.resume_from:
         runner.resume(cfg.resume_from)
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
-    runner.run(data_loaders, cfg.workflow)
+    if flash_backend is None:
+        # Record the current choice, not a resumed checkpoint's former policy.
+        if runner.meta is None:
+            runner.meta = {}
+        runner.meta['flash_backend'] = 'native-half'
+        logger.info('Attention precision backend: native-half (unchanged)')
+    try:
+        runner.run(data_loaders, cfg.workflow)
+    finally:
+        if attention_precision_hook is not None:
+            attention_precision_hook.close()
 

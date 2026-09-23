@@ -124,6 +124,9 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    flash_backend = cfg.get('flash_attention_backend', None)
+    if flash_backend not in (None, 'fp32-math'):
+        raise ValueError(f'unsupported flash_attention_backend: {flash_backend!r}')
     # import modules from string list.
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings
@@ -231,20 +234,33 @@ def main():
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
 
-    if args.eval_options is not None and 'load_from' in args.eval_options:
-        outputs = None
-    else:
-        if not distributed:
-            model = MMDataParallel(model, device_ids=[0])
-            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
-            assert False
+    attention_precision_policy = None
+    try:
+        if flash_backend == 'fp32-math':
+            from projects.mmdet3d_plugin.core.hook.attention_precision import FlashFP32Policy
+            if torch.backends.cuda.matmul.allow_tf32:
+                raise RuntimeError('FP32 math attention requires matmul.allow_tf32=False')
+            attention_precision_policy = FlashFP32Policy(model, enabled=True)
+            attention_precision_policy.install()
+        print('Evaluation attention precision backend: ' + (flash_backend or 'native-half') +
+              '; checkpoint backend: ' + str(checkpoint.get('meta', {}).get('flash_backend', 'unknown')))
+        if args.eval_options is not None and 'load_from' in args.eval_options:
+            outputs = None
         else:
-            model = MMDistributedDataParallel(
-                model.cuda(),
-                device_ids=[torch.cuda.current_device()],
-                broadcast_buffers=False)
-            outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
-                                            args.gpu_collect)
+            if not distributed:
+                model = MMDataParallel(model, device_ids=[0])
+                outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+                assert False
+            else:
+                model = MMDistributedDataParallel(
+                    model.cuda(),
+                    device_ids=[torch.cuda.current_device()],
+                    broadcast_buffers=False)
+                outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
+                                                args.gpu_collect)
+    finally:
+        if attention_precision_policy is not None:
+            attention_precision_policy.close()
 
     rank, _ = get_dist_info()
     if rank == 0:
