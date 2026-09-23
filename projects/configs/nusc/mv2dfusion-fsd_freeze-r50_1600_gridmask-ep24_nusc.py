@@ -645,6 +645,13 @@ optimizer_config = dict(
     type='Fp16OptimizerHook', loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2))
 
+# Image precision is opt-in through --cfg-options image_precision=...
+# image-fp32: FP32 wrappers for backbone/FPN, 2D head, ROI extractor and query generator.
+# feature-amp-consumer-fp32: mixed-precision backbone/FPN; 2D head, ROI extractor
+# and query generator stay FP32. This mode also handles one backbone weight
+# gradient and eight FPN SyncBN gradient reductions separately; it requires
+# flash_attention_backend=fp32-math.
+
 # fp32-math uses FP32 attention in six decoder FlashAttention modules during
 # training and evaluation. It requires Float Q/KV, no mask/causality/dropout,
 # and matmul TF32 disabled. The default remains native attention.

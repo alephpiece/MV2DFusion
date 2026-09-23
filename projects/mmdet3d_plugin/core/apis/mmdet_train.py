@@ -303,6 +303,17 @@ def custom_train_detector(model,
             hook = build_from_cfg(hook_cfg, HOOKS)
             runner.register_hook(hook, priority=priority)
 
+    image_precision_hook = None
+    image_precision = cfg.get('image_precision', None)
+    if image_precision is not None:
+        if image_precision not in ('image-fp32', 'feature-amp-consumer-fp32'):
+            raise ValueError(f'unsupported image_precision: {image_precision!r}')
+        if image_precision.startswith('feature-amp-') and flash_backend != 'fp32-math':
+            raise ValueError('feature-AMP image precision requires fp32-math point attention')
+        from projects.mmdet3d_plugin.core.hook.image_precision import ImageFP32Hook
+        image_precision_hook = ImageFP32Hook(mode=image_precision)
+        runner.register_hook(image_precision_hook, priority='LOW')
+
     attention_precision_hook = None
     if flash_backend == 'fp32-math':
         from projects.mmdet3d_plugin.core.hook.attention_precision import FlashFP32Hook
@@ -322,6 +333,10 @@ def custom_train_detector(model,
     try:
         runner.run(data_loaders, cfg.workflow)
     finally:
-        if attention_precision_hook is not None:
-            attention_precision_hook.close()
+        try:
+            if attention_precision_hook is not None:
+                attention_precision_hook.close()
+        finally:
+            if image_precision_hook is not None:
+                image_precision_hook.close()
 

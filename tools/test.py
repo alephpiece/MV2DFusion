@@ -127,6 +127,11 @@ def main():
     flash_backend = cfg.get('flash_attention_backend', None)
     if flash_backend not in (None, 'fp32-math'):
         raise ValueError(f'unsupported flash_attention_backend: {flash_backend!r}')
+    if cfg.get('image_precision', None) is not None:
+        warnings.warn(
+            'image_precision is a training-only option and is not applied by '
+            'tools/test.py; evaluation runs without the training image-precision '
+            'wrappers.', UserWarning)
     # import modules from string list.
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings
