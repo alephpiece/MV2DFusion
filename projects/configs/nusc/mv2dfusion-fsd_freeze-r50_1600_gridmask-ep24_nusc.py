@@ -594,6 +594,7 @@ test_pipeline = [
 data = dict(
     samples_per_gpu=batch_size,
     workers_per_gpu=6,
+    pin_memory=True,
     train=dict(
         type=dataset_type,
         data_root=data_root,

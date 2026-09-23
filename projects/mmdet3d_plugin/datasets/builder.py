@@ -19,6 +19,12 @@ from projects.mmdet3d_plugin.datasets.samplers.group_sampler import DistributedG
 from projects.mmdet3d_plugin.datasets.samplers.distributed_sampler import DistributedSampler
 from projects.mmdet3d_plugin.datasets.samplers.group_sampler import InfiniteGroupEachSampleInBatchSampler
 from projects.mmdet3d_plugin.datasets.samplers.sampler import build_sampler
+from projects.mmdet3d_plugin.datasets.pin_memory import wrap_data_containers
+
+
+def collate_for_pin_memory(batch, samples_per_gpu):
+    return wrap_data_containers(
+        collate(batch, samples_per_gpu=samples_per_gpu))
 
 def build_dataloader(dataset,
                      samples_per_gpu,
@@ -30,6 +36,7 @@ def build_dataloader(dataset,
                      shuffler_sampler=None,
                      nonshuffler_sampler=None,
                      runner_type=dict(type='EpochBasedRunner'),
+                     pin_memory=False,
                      **kwargs):
     """Build PyTorch DataLoader.
     In distributed training, each GPU/process has a dataloader.
@@ -104,14 +111,15 @@ def build_dataloader(dataset,
         worker_init_fn, num_workers=num_workers, rank=rank,
         seed=seed) if seed is not None else None
 
+    collate_fn = collate_for_pin_memory if pin_memory else collate
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
         batch_sampler=batch_sampler,
         num_workers=num_workers,
-        collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
-        pin_memory=False,
+        collate_fn=partial(collate_fn, samples_per_gpu=samples_per_gpu),
+        pin_memory=pin_memory,
         worker_init_fn=init_fn,
         **kwargs)
 
