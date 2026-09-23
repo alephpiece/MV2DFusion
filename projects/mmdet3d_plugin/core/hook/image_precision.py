@@ -15,11 +15,14 @@ ROOTS = ('img_backbone', 'img_neck', 'img_roi_head',
          'img_roi_extractor', 'img_query_generator')
 METHODS = ('extract_img_feat', 'forward_roi_head_train', 'forward_roi_head')
 FEATURE_AMP = 'feature-amp-consumer-fp32'
+FEATURE_AMP_DET2D = 'feature-amp-det2d-mixed'
 MODE_SCOPES = {
     'image-fp32': (METHODS, ROOTS),
     FEATURE_AMP: (
         ('forward_roi_head_train', 'forward_roi_head'),
         ('img_roi_head', 'img_roi_extractor', 'img_query_generator')),
+    FEATURE_AMP_DET2D: (
+        (), ('img_roi_extractor', 'img_query_generator')),
 }
 
 
@@ -90,7 +93,7 @@ class ImageFP32Policy:
                     continue
                 seen.add(key)
                 self._bind(module, name, function)
-            if self.mode == FEATURE_AMP:
+            if self.mode in (FEATURE_AMP, FEATURE_AMP_DET2D):
                 from projects.mmdet3d_plugin.core.hook.feature_amp_numerics import FeatureAMPNumericsPolicy
                 self.numerics = FeatureAMPNumericsPolicy(self.model)
                 self.numerics.install()

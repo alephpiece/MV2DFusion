@@ -306,7 +306,8 @@ def custom_train_detector(model,
     image_precision_hook = None
     image_precision = cfg.get('image_precision', None)
     if image_precision is not None:
-        if image_precision not in ('image-fp32', 'feature-amp-consumer-fp32'):
+        if image_precision not in ('image-fp32', 'feature-amp-consumer-fp32',
+                                   'feature-amp-det2d-mixed'):
             raise ValueError(f'unsupported image_precision: {image_precision!r}')
         if image_precision.startswith('feature-amp-') and flash_backend != 'fp32-math':
             raise ValueError('feature-AMP image precision requires fp32-math point attention')
