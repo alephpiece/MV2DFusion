@@ -10,6 +10,7 @@ from mmdet3d.models import builder
 
 from mmdet3d.ops import Voxelization, furthest_point_sample
 from .ops.sst.sst_ops import scatter_v2, get_inner_win_inds, build_mlp
+from .sparse_checkpoint import native_sparse_checkpoint_loading
 from scipy.sparse.csgraph import connected_components
 from mmdet.core import multi_apply
 from mmdet3d.models.detectors.single_stage import SingleStage3DDetector
@@ -106,7 +107,8 @@ class SingleStageFSDV2(SingleStage3DDetector):
         self.freeze = freeze
 
     def init_weights(self) -> None:
-        super(SingleStageFSDV2, self).init_weights()
+        with native_sparse_checkpoint_loading(self):
+            super(SingleStageFSDV2, self).init_weights()
         if self.freeze:
             for p in self.parameters():
                 p.requires_grad = False
