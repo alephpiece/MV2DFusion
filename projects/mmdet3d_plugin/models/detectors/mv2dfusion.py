@@ -11,6 +11,10 @@
 # Modified from mmdetection3d (https://github.com/open-mmlab/mmdetection3d)
 # Copyright (c) OpenMMLab. All rights reserved.
 # ------------------------------------------------------------------------
+from concurrent.futures import Future
+from queue import SimpleQueue
+from threading import Thread
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,6 +53,63 @@ class GroupedItems(object):
 
     def __len__(self):
         return len(self.items)
+
+
+def _record_cuda_tensors(value, stream):
+    if isinstance(value, torch.Tensor):
+        if value.is_cuda:
+            value.record_stream(stream)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _record_cuda_tensors(item, stream)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _record_cuda_tensors(item, stream)
+    elif hasattr(value, 'tensor') and isinstance(value.tensor, torch.Tensor):
+        _record_cuda_tensors(value.tensor, stream)
+
+
+class _PointWorker:
+    """Run one point task at a time without blocking process exit on failure."""
+
+    def __init__(self):
+        self._tasks = SimpleQueue()
+        self._closed = False
+        self._thread = Thread(target=self._run, args=(self._tasks,),
+                              name='mv2dfusion-point', daemon=True)
+        self._thread.start()
+
+    @staticmethod
+    def _run(tasks):
+        while True:
+            task = tasks.get()
+            if task is None:
+                return
+            future, fn = task
+            del task
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(fn())
+                    except BaseException as error:
+                        future.set_exception(error)
+                        return
+            finally:
+                del future, fn
+
+    def submit(self, fn):
+        if self._closed:
+            raise RuntimeError('point worker is closed')
+        future = Future()
+        self._tasks.put((future, fn))
+        return future
+
+    def close(self, wait):
+        if not self._closed:
+            self._closed = True
+            self._tasks.put(None)
+        if wait:
+            self._thread.join()
 
 
 @DETECTORS.register_module()
@@ -91,6 +152,7 @@ class MV2DFusion(MVXTwoStageDetector):
                  train_cfg=None,
                  test_cfg=None,
                  debug=None,
+                 point_image_overlap=False,
                  ):
         self.dataset = dataset
         if pts_voxel_layer is not None:
@@ -146,6 +208,70 @@ class MV2DFusion(MVXTwoStageDetector):
         self.current_seq = 0
 
         self.debug = debug
+        self.point_image_overlap = point_image_overlap
+        self._point_worker = None
+        self._point_stream = None
+        self._point_future = None
+        self._point_worker_failed = False
+
+    def close_point_worker(self):
+        """Release an idle worker, or stop accepting work after a failed step.
+
+        A running task cannot be interrupted. Failed distributed jobs must be
+        terminated as a group; neither GPU completion nor recovery is implied.
+        """
+        worker = self._point_worker
+        if worker is None:
+            return
+        if self._point_future is not None:
+            self._point_worker_failed = True
+            self._point_future.cancel()
+            self._point_future = None
+        self._point_worker = None
+        worker.close(wait=not self._point_worker_failed)
+
+    def _submit_point_train(self, point_args):
+        if self._point_future is not None:
+            raise RuntimeError('point overlap requires sequential model calls')
+        device = torch.cuda.current_device()
+        main_stream = torch.cuda.current_stream(device)
+        if self._point_stream is None:
+            if any(p.requires_grad for p in self.pts_backbone.parameters()):
+                raise RuntimeError('point overlap requires frozen point parameters')
+            self._point_stream = torch.cuda.Stream(device=device)
+            _record_cuda_tensors(list(self.pts_backbone.parameters()), self._point_stream)
+            _record_cuda_tensors(list(self.pts_backbone.buffers()), self._point_stream)
+        if self._point_worker is None:
+            self._point_worker = _PointWorker()
+        point_stream = self._point_stream
+        ready = torch.cuda.Event()
+        ready.record(main_stream)
+        _record_cuda_tensors(point_args, point_stream)
+        grad_enabled = torch.is_grad_enabled()
+        amp_enabled = torch.is_autocast_enabled('cuda')
+        amp_dtype = torch.get_autocast_dtype('cuda')
+
+        def run_point():
+            torch.cuda.set_device(device)
+            with torch.cuda.stream(point_stream):
+                point_stream.wait_event(ready)
+                with torch.set_grad_enabled(grad_enabled):
+                    with torch.autocast('cuda', enabled=amp_enabled, dtype=amp_dtype):
+                        result = self.pts_backbone.forward_train(*point_args)
+                done = torch.cuda.Event()
+                done.record(point_stream)
+            return result, done
+
+        self._point_future = self._point_worker.submit(run_point)
+        return self._point_future
+
+    def _join_point_train(self, future):
+        out_dict, done = future.result()
+        current_stream = torch.cuda.current_stream()
+        current_stream.wait_event(done)
+        _record_cuda_tensors(out_dict, current_stream)
+        self._point_future = None
+        return out_dict
 
     @auto_fp16(apply_to=('img'), out_fp32=True)
     def extract_img_feat(self, img, len_queue=1, training_mode=False):
@@ -469,6 +595,8 @@ class MV2DFusion(MVXTwoStageDetector):
                           requires_grad=True,
                           return_losses=False,
                           **data):
+        if self._point_worker_failed:
+            raise RuntimeError('point overlap failed; restart the training job')
         data['gt_bboxes'] = gt_bboxes
         data['gt_labels'] = gt_labels
         data['gt_bboxes_3d'] = gt_bboxes_3d
@@ -481,64 +609,98 @@ class MV2DFusion(MVXTwoStageDetector):
         if not requires_grad:
             raise NotImplementedError
         else:
-            # image query generation
-            if self.with_img_roi_head:
-                losses_det2d = self.forward_roi_head_train(imgs_det, feats_det, img_metas_det, gt_bboxes, gt_labels)
+            try:
+                point_future = None
+                if self.point_image_overlap:
+                    if not self.pts_backbone.freeze:
+                        raise RuntimeError('point overlap requires a frozen point backbone')
+                    fsd_gt_bboxes_3d, fsd_gt_labels_3d = [], []
+                    for b in range(B):
+                        box, label = self.convert_to_fsd_anno(gt_bboxes_3d[b], gt_labels_3d[b])
+                        fsd_gt_bboxes_3d.append(box)
+                        fsd_gt_labels_3d.append(label)
+                    point_args = (data['pts_feats'], img_metas, fsd_gt_bboxes_3d, fsd_gt_labels_3d)
+                    point_future = self._submit_point_train(point_args)
 
-            self.eval()
-            with torch.no_grad():
-                dets2d, dets = self.forward_roi_head(imgs_det, feats_det, img_metas_det)
-                dets_gt = self.process_2d_gt(sum(gt_bboxes, []), sum(gt_labels, []), imgs_det.device)
-                assert len(dets) == (len(dets_gt))
-                if self.use_2d_proposal:
-                    dets = sum([x for x in data['proposals']], [])
-                dets = [self.complement_2d_gt(det, det_gt, )
-                        for det, det_gt in zip(dets, dets_gt)]
+                # image query generation
+                if self.with_img_roi_head:
+                    losses_det2d = self.forward_roi_head_train(imgs_det, feats_det, img_metas_det, gt_bboxes, gt_labels)
 
-                # prevent empty detection during training
-                if sum([len(p) for p in dets]) == 0:
-                    proposal = torch.tensor([[10, 20, 30, 40, 0, 1]], dtype=dets[0].dtype, device=dets[0].device)
-                    dets = [proposal] + dets[1:]
+                roi_was_training = self.img_roi_head.training
+                if self.point_image_overlap:
+                    self.img_roi_head.eval()
+                else:
+                    self.eval()
+                try:
+                    with torch.no_grad():
+                        dets2d, dets = self.forward_roi_head(imgs_det, feats_det, img_metas_det)
+                        dets_gt = self.process_2d_gt(sum(gt_bboxes, []), sum(gt_labels, []), imgs_det.device)
+                        assert len(dets) == (len(dets_gt))
+                        if self.use_2d_proposal:
+                            dets = sum([x for x in data['proposals']], [])
+                        dets = [self.complement_2d_gt(det, det_gt, )
+                                for det, det_gt in zip(dets, dets_gt)]
 
-                rois = bbox2roi(dets)
-            self.train()
+                        # prevent empty detection during training
+                        if sum([len(p) for p in dets]) == 0:
+                            proposal = torch.tensor([[10, 20, 30, 40, 0, 1]], dtype=dets[0].dtype, device=dets[0].device)
+                            dets = [proposal] + dets[1:]
 
-            roi_feats = self.extract_roi_feats(feats_det, rois, **data)
-            n_rois_per_view = [len(p) for p in dets]
-            n_rois_per_batch = [sum(n_rois_per_view[i * V: (i + 1) * V]) for i in range(B)]
+                        rois = bbox2roi(dets)
+                finally:
+                    if self.point_image_overlap:
+                        self.img_roi_head.train(roi_was_training)
+                    else:
+                        self.train()
 
-            dyn_query, dyn_feats = self.img_query_generator(roi_feats, dets, img_metas_det,
-                                                            n_rois_per_view=n_rois_per_view,
-                                                            n_rois_per_batch=n_rois_per_batch,
-                                                            data=data)
-            dyn_feats_pred = dyn_feats
+                roi_feats = self.extract_roi_feats(feats_det, rois, **data)
+                n_rois_per_view = [len(p) for p in dets]
+                n_rois_per_batch = [sum(n_rois_per_view[i * V: (i + 1) * V]) for i in range(B)]
 
-            if self.gt_mono_loss:
-                rois_gt = bbox2roi(dets_gt)
-                roi_feats_gt = self.extract_roi_feats(feats_det, rois_gt, **data)
-                n_rois_per_view_gt = [len(p) for p in dets_gt]
-                n_rois_per_batch_gt = [sum(n_rois_per_view_gt[i * V: (i + 1) * V]) for i in range(B)]
-                _, dyn_feats = self.img_query_generator(roi_feats_gt, dets_gt, img_metas_det,
-                                                        n_rois_per_view=n_rois_per_view_gt,
-                                                        n_rois_per_batch=n_rois_per_batch_gt,
-                                                        data=data,)
-                n_rois_per_batch = n_rois_per_batch_gt
+                dyn_query, dyn_feats = self.img_query_generator(roi_feats, dets, img_metas_det,
+                                                                n_rois_per_view=n_rois_per_view,
+                                                                n_rois_per_batch=n_rois_per_batch,
+                                                                data=data)
+                dyn_feats_pred = dyn_feats
 
-            # lidar query generation
-            fsd_gt_bboxes_3d, fsd_gt_labels_3d = [], []
-            for b in range(B):
-                box, label = self.convert_to_fsd_anno(gt_bboxes_3d[b], gt_labels_3d[b])
-                fsd_gt_bboxes_3d.append(box)
-                fsd_gt_labels_3d.append(label)
-            out_dict = self.pts_backbone.forward_train(data['pts_feats'], img_metas, fsd_gt_bboxes_3d, fsd_gt_labels_3d)
-            pts_feat, pts_pos, pts_query_feat, pts_query_center = self.pts_query_generator(
-                out_dict['voxel_feats'], out_dict['voxel_coors'], out_dict['voxel_xyz'], out_dict['query_feats'],
-                out_dict['query_xyz'], out_dict['query_pred'], out_dict['query_cat'], B)
-            losses_pts = out_dict['losses']
+                if self.gt_mono_loss:
+                    rois_gt = bbox2roi(dets_gt)
+                    roi_feats_gt = self.extract_roi_feats(feats_det, rois_gt, **data)
+                    n_rois_per_view_gt = [len(p) for p in dets_gt]
+                    n_rois_per_batch_gt = [sum(n_rois_per_view_gt[i * V: (i + 1) * V]) for i in range(B)]
+                    _, dyn_feats = self.img_query_generator(roi_feats_gt, dets_gt, img_metas_det,
+                                                            n_rois_per_view=n_rois_per_view_gt,
+                                                            n_rois_per_batch=n_rois_per_batch_gt,
+                                                            data=data,)
+                    n_rois_per_batch = n_rois_per_batch_gt
 
-            outs = self.fusion_bbox_head(img_metas, dyn_query=dyn_query, dyn_feats=dyn_feats_pred,
-                                      pts_query_center=pts_query_center, pts_query_feat=pts_query_feat,
-                                      pts_feat=pts_feat, pts_pos=pts_pos, pts_shape=None, **data)
+                # lidar query generation
+                if point_future is None:
+                    fsd_gt_bboxes_3d, fsd_gt_labels_3d = [], []
+                    for b in range(B):
+                        box, label = self.convert_to_fsd_anno(gt_bboxes_3d[b], gt_labels_3d[b])
+                        fsd_gt_bboxes_3d.append(box)
+                        fsd_gt_labels_3d.append(label)
+                    out_dict = self.pts_backbone.forward_train(
+                        data['pts_feats'], img_metas, fsd_gt_bboxes_3d, fsd_gt_labels_3d)
+                else:
+                    out_dict = self._join_point_train(point_future)
+                pts_feat, pts_pos, pts_query_feat, pts_query_center = self.pts_query_generator(
+                    out_dict['voxel_feats'], out_dict['voxel_coors'], out_dict['voxel_xyz'], out_dict['query_feats'],
+                    out_dict['query_xyz'], out_dict['query_pred'], out_dict['query_cat'], B)
+                losses_pts = out_dict['losses']
+
+                outs = self.fusion_bbox_head(img_metas, dyn_query=dyn_query, dyn_feats=dyn_feats_pred,
+                                          pts_query_center=pts_query_center, pts_query_feat=pts_query_feat,
+                                          pts_feat=pts_feat, pts_pos=pts_pos, pts_shape=None, **data)
+            except BaseException:
+                if self._point_worker is not None:
+                    self._point_worker_failed = True
+                    try:
+                        self.close_point_worker()
+                    except BaseException:
+                        pass  # Preserve the original forward exception.
+                raise
 
         if return_losses:
             loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
@@ -736,6 +898,8 @@ class MV2DFusion(MVXTwoStageDetector):
         list[list[dict]]), with the outer list indicating test time
         augmentations.
         """
+        if self._point_worker_failed:
+            raise RuntimeError('point overlap failed; restart the training job')
         for key in ['proposals', 'instance_inds_2d', 'points']:
             if key in data:
                 data[key] = list(zip(*data[key]))

@@ -331,8 +331,19 @@ def custom_train_detector(model,
             runner.meta = {}
         runner.meta['flash_backend'] = 'native-half'
         logger.info('Attention precision backend: native-half (unchanged)')
+    close_point_worker = getattr(model.module, 'close_point_worker', None)
     try:
         runner.run(data_loaders, cfg.workflow)
+    except BaseException:
+        try:
+            if close_point_worker is not None:
+                close_point_worker()
+        except BaseException:
+            pass  # Preserve the original training exception.
+        raise
+    else:
+        if close_point_worker is not None:
+            close_point_worker()
     finally:
         try:
             if attention_precision_hook is not None:
