@@ -133,10 +133,14 @@ def custom_train_detector(model,
                    meta=None):
     logger = get_root_logger(cfg.log_level)
     flash_backend = cfg.get('flash_attention_backend', None)
-    if flash_backend not in (None, 'fp32-math'):
+    if flash_backend not in (None, 'fp32-math', 'fp32-gemm-fused-safe-softmax'):
         raise ValueError(f'unsupported flash_attention_backend: {flash_backend!r}')
     if flash_backend is not None and eval_model is not None:
         raise ValueError('flash_attention_backend with a separate eval_model is not supported')
+    if flash_backend == 'fp32-gemm-fused-safe-softmax':
+        if validate or any(mode != 'train' for mode, _ in cfg.workflow):
+            raise ValueError('fused safe-softmax supports training only; use --no-validate '
+                             'and evaluate separately with fp32-math')
 
 
     # prepare data loaders
@@ -309,16 +313,16 @@ def custom_train_detector(model,
         if image_precision not in ('image-fp32', 'feature-amp-consumer-fp32',
                                    'feature-amp-det2d-mixed'):
             raise ValueError(f'unsupported image_precision: {image_precision!r}')
-        if image_precision.startswith('feature-amp-') and flash_backend != 'fp32-math':
-            raise ValueError('feature-AMP image precision requires fp32-math point attention')
+        if image_precision.startswith('feature-amp-') and flash_backend is None:
+            raise ValueError('feature-AMP image precision requires FP32 point attention')
         from projects.mmdet3d_plugin.core.hook.image_precision import ImageFP32Hook
         image_precision_hook = ImageFP32Hook(mode=image_precision)
         runner.register_hook(image_precision_hook, priority='LOW')
 
     attention_precision_hook = None
-    if flash_backend == 'fp32-math':
+    if flash_backend is not None:
         from projects.mmdet3d_plugin.core.hook.attention_precision import FlashFP32Hook
-        attention_precision_hook = FlashFP32Hook()
+        attention_precision_hook = FlashFP32Hook(backend=flash_backend)
         runner.register_hook(attention_precision_hook, priority='LOW')
 
     if cfg.resume_from:
