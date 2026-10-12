@@ -124,7 +124,11 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
-    flash_backend = cfg.get('flash_attention_backend', None)
+    flash_backend = cfg.get('evaluation_flash_attention_backend',
+                            cfg.get('flash_attention_backend', None))
+    if (args.cfg_options is not None and 'flash_attention_backend' in args.cfg_options
+            and 'evaluation_flash_attention_backend' not in args.cfg_options):
+        flash_backend = cfg.flash_attention_backend
     if flash_backend not in (None, 'fp32-math'):
         raise ValueError(f'unsupported flash_attention_backend: {flash_backend!r}')
     if cfg.get('image_precision', None) is not None:

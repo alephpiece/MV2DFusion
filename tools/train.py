@@ -126,6 +126,9 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    validate_during_training = cfg.get('validate_during_training', True)
+    if type(validate_during_training) is not bool:
+        raise TypeError('validate_during_training must be bool')
     # import modules from string list.
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings
@@ -292,7 +295,7 @@ def main():
         datasets,
         cfg,
         distributed=distributed,
-        validate=(not args.no_validate),
+        validate=(not args.no_validate and validate_during_training),
         timestamp=timestamp,
         meta=meta)
 

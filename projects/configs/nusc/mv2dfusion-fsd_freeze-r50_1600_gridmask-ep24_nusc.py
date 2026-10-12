@@ -651,9 +651,11 @@ optimizer_config = dict(
 image_precision = 'feature-amp-det2d-mixed'
 image_conv_weight_gradient = True
 
-# FP32 math attention is used for the six decoder inner modules.
-# Float Q/KV, no mask/causality/dropout, and matmul TF32 disabled are required.
-flash_attention_backend = 'fp32-math'
+# Fused FP32 training attention has known bounded-validation quality differences.
+# Use fp32-math as the comparison backend and for independent evaluation.
+flash_attention_backend = 'fp32-gemm-fused-safe-softmax'
+evaluation_flash_attention_backend = 'fp32-math'
+validate_during_training = False
 
 # optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
