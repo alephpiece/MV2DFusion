@@ -309,6 +309,11 @@ def custom_train_detector(model,
 
     image_precision_hook = None
     image_precision = cfg.get('image_precision', None)
+    conv_weight_gradient = cfg.get('image_conv_weight_gradient', False)
+    if type(conv_weight_gradient) is not bool:
+        raise TypeError('image_conv_weight_gradient must be bool')
+    if conv_weight_gradient and image_precision != 'feature-amp-det2d-mixed':
+        raise ValueError('image_conv_weight_gradient requires feature-amp-det2d-mixed')
     if image_precision is not None:
         if image_precision not in ('image-fp32', 'feature-amp-consumer-fp32',
                                    'feature-amp-det2d-mixed'):
@@ -316,7 +321,8 @@ def custom_train_detector(model,
         if image_precision.startswith('feature-amp-') and flash_backend is None:
             raise ValueError('feature-AMP image precision requires FP32 point attention')
         from projects.mmdet3d_plugin.core.hook.image_precision import ImageFP32Hook
-        image_precision_hook = ImageFP32Hook(mode=image_precision)
+        image_precision_hook = ImageFP32Hook(mode=image_precision,
+                                             conv_weight_gradient=conv_weight_gradient)
         runner.register_hook(image_precision_hook, priority='LOW')
 
     attention_precision_hook = None

@@ -45,13 +45,19 @@ def _mmcv_decorated(function):
 
 
 class ImageFP32Policy:
-    def __init__(self, model, mode='image-fp32'):
+    def __init__(self, model, mode='image-fp32', conv_weight_gradient=False):
         if mode not in MODE_SCOPES:
             raise ValueError('unsupported image precision mode: ' + repr(mode))
+        if type(conv_weight_gradient) is not bool:
+            raise TypeError('conv_weight_gradient must be bool')
+        if conv_weight_gradient and mode != FEATURE_AMP_DET2D:
+            raise ValueError('convolution weight gradients require feature-amp-det2d-mixed')
         self.model = model.module if hasattr(model, 'module') else model
         self.mode = mode
+        self.conv_weight_gradient = conv_weight_gradient
         self.bindings = []
         self.numerics = None
+        self.conv_gradients = None
 
     def _bind(self, module, name, function):
         had_local = name in vars(module)
@@ -97,12 +103,20 @@ class ImageFP32Policy:
                 from projects.mmdet3d_plugin.core.hook.feature_amp_numerics import FeatureAMPNumericsPolicy
                 self.numerics = FeatureAMPNumericsPolicy(self.model)
                 self.numerics.install()
+            if self.conv_weight_gradient:
+                from projects.mmdet3d_plugin.core.hook.conv_weight_gradient import ImageConvWeightGradientPolicy
+                self.conv_gradients = ImageConvWeightGradientPolicy(
+                    self.model, protected_binding=self.numerics.conv_binding)
+                self.conv_gradients.install()
         except BaseException:
             self.close()
             raise
         return self
 
     def close(self):
+        if self.conv_gradients is not None:
+            self.conv_gradients.close()
+            self.conv_gradients = None
         if self.numerics is not None:
             self.numerics.close()
             self.numerics = None
@@ -119,10 +133,11 @@ class ImageFP32Policy:
 
 
 class ImageFP32Hook(Hook):
-    def __init__(self, mode='image-fp32'):
+    def __init__(self, mode='image-fp32', conv_weight_gradient=False):
         if mode not in MODE_SCOPES:
             raise ValueError('unsupported image precision mode: ' + repr(mode))
         self.mode = mode
+        self.conv_weight_gradient = conv_weight_gradient
         self.policy = None
 
     def before_run(self, runner):
@@ -132,7 +147,8 @@ class ImageFP32Hook(Hook):
                       if isinstance(hook, Fp16OptimizerHook)]
         if len(optimizers) != 1 or optimizers[0] >= runner.hooks.index(self):
             raise RuntimeError('image precision hook must run after one Fp16OptimizerHook')
-        self.policy = ImageFP32Policy(runner.model, mode=self.mode)
+        self.policy = ImageFP32Policy(runner.model, mode=self.mode,
+                                      conv_weight_gradient=self.conv_weight_gradient)
         self.policy.install()
 
     def after_run(self, runner):
