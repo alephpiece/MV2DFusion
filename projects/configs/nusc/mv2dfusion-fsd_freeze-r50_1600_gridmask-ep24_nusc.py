@@ -56,6 +56,7 @@ roi_strides = [4, 8, 16, 32, 64]
 model = dict(
     type='MV2DFusion',
     dataset='nuscenes',
+    point_image_overlap=True,
     num_frame_head_grads=num_frame_losses,
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
@@ -645,20 +646,14 @@ optimizer_config = dict(
     type='Fp16OptimizerHook', loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2))
 
-# Image precision is opt-in through --cfg-options image_precision=...
-# image-fp32: FP32 wrappers for backbone/FPN, 2D head, ROI extractor and query generator.
-# feature-amp-consumer-fp32: mixed-precision backbone/FPN; 2D head, ROI extractor
-# and query generator stay FP32.
-# feature-amp-det2d-mixed: also removes the 2D head's FP32 wrappers; ROI and query
-# generation stay FP32. Both feature-amp modes handle one backbone weight gradient
-# and eight FPN SyncBN gradient reductions separately.
-# To select the mixed-precision 2D head, pass image_precision=feature-amp-det2d-mixed
-# and flash_attention_backend=fp32-math together.
+# Mixed-precision image features and 2D head; ROI/query generation stay FP32.
+# Backbone weight-gradient and FPN SyncBN precision protections remain active.
+image_precision = 'feature-amp-det2d-mixed'
+image_conv_weight_gradient = True
 
-# fp32-math uses FP32 attention in six decoder FlashAttention modules during
-# training and evaluation. It requires Float Q/KV, no mask/causality/dropout,
-# and matmul TF32 disabled. The default remains native attention.
-flash_attention_backend = None
+# FP32 math attention is used for the six decoder inner modules.
+# Float Q/KV, no mask/causality/dropout, and matmul TF32 disabled are required.
+flash_attention_backend = 'fp32-math'
 
 # optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
