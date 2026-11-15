@@ -453,7 +453,7 @@ model = dict(
                     ],
                     feedforward_channels=2048,
                     ffn_dropout=0.1,
-                    with_cp=False,  ###use checkpoint to save memory
+                    with_cp=False,
                     operation_order=(
                         'self_attn', 'norm',
                         'cross_attn', 'norm',
@@ -509,7 +509,7 @@ ida_aug_conf = {
 }
 
 dataset_type = 'CustomNuScenesDataset'
-data_root = '/workspace/MV2DFusion/data/nuscenes/'
+data_root = 'data/nuscenes/'
 
 train_pipeline = [
     dict(
@@ -668,19 +668,7 @@ lr_config = dict(
     min_lr_ratio=1e-3,
 )
 
-custom_hooks = [
-    # dict(
-    #     type='ProfilerHook',
-    #     by_epoch=False,
-    #     profile_iters=5,
-    #     activities=['cpu', 'cuda'],
-    #     record_shapes=True,
-    #     profile_memory=True,
-    #     with_stack=True,
-    #     with_flops=True,
-    #     json_trace_path='./profiler/BW150_all_gpu_5iter_flashattn.json',
-    # )
-]
+custom_hooks = []
 
 evaluation = dict(interval=3 * num_iters_per_epoch, pipeline=test_pipeline)
 checkpoint_config = dict(interval=1 * num_iters_per_epoch)
