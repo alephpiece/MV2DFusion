@@ -12,6 +12,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 # ------------------------------------------------------------------------
 from concurrent.futures import Future
+import os
 from queue import SimpleQueue
 from threading import Thread
 
@@ -242,6 +243,13 @@ class MV2DFusion(MVXTwoStageDetector):
             _record_cuda_tensors(list(self.pts_backbone.parameters()), self._point_stream)
             _record_cuda_tensors(list(self.pts_backbone.buffers()), self._point_stream)
         if self._point_worker is None:
+            if (torch.version.hip is not None and
+                    os.environ.get('SPCONV_ROCM_FLEXGEMM_SUBM', '1') in
+                    {'1', 'true', 'TRUE', 'yes', 'YES', 'on', 'ON'}):
+                # HIP library discovery calls back into Python while holding the
+                # loader lock. Initialize before a worker can race image launches.
+                from triton.runtime import driver
+                driver.active.get_current_target()
             self._point_worker = _PointWorker()
         point_stream = self._point_stream
         ready = torch.cuda.Event()
