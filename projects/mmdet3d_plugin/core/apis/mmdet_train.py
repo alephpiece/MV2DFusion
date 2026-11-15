@@ -6,6 +6,7 @@
 # ---------------------------------------------
 #  Modified by Shihao Wang
 # ---------------------------------------------
+from contextlib import ExitStack
 import random
 import warnings
 
@@ -203,7 +204,9 @@ def custom_train_detector(model,
         runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
 
     # user-defined hooks
+    roi_aggregation_hooks = []
     if cfg.get('custom_hooks', None):
+        from projects.mmdet3d_plugin.core.hook.roi_bin_aggregation import RoIAlignBinAggregationHook
         custom_hooks = cfg.custom_hooks
         assert isinstance(custom_hooks, list), \
             f'custom_hooks expect list type, but got {type(custom_hooks)}'
@@ -215,6 +218,8 @@ def custom_train_detector(model,
             priority = hook_cfg.pop('priority', 'NORMAL')
             hook = build_from_cfg(hook_cfg, HOOKS)
             runner.register_hook(hook, priority=priority)
+            if isinstance(hook, RoIAlignBinAggregationHook):
+                roi_aggregation_hooks.append(hook)
 
     image_precision_hook = None
     image_precision = cfg.get('image_precision', None)
@@ -251,23 +256,25 @@ def custom_train_detector(model,
         runner.meta['flash_backend'] = 'native-half'
         logger.info('Attention precision backend: native-half (unchanged)')
     close_point_worker = getattr(model.module, 'close_point_worker', None)
-    try:
-        runner.run(data_loaders, cfg.workflow)
-    except BaseException:
+    # after_run is skipped when before_run or training fails. Close only the
+    # policies this API owns, in reverse registration order, even if one fails.
+    with ExitStack() as policy_cleanup:
+        for hook in roi_aggregation_hooks:
+            policy_cleanup.callback(hook.close)
+        if image_precision_hook is not None:
+            policy_cleanup.callback(image_precision_hook.close)
+        if attention_precision_hook is not None:
+            policy_cleanup.callback(attention_precision_hook.close)
         try:
+            runner.run(data_loaders, cfg.workflow)
+        except BaseException:
+            try:
+                if close_point_worker is not None:
+                    close_point_worker()
+            except BaseException:
+                pass  # Preserve the original training exception.
+            raise
+        else:
             if close_point_worker is not None:
                 close_point_worker()
-        except BaseException:
-            pass  # Preserve the original training exception.
-        raise
-    else:
-        if close_point_worker is not None:
-            close_point_worker()
-    finally:
-        try:
-            if attention_precision_hook is not None:
-                attention_precision_hook.close()
-        finally:
-            if image_precision_hook is not None:
-                image_precision_hook.close()
 
