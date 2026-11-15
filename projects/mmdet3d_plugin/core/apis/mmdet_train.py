@@ -13,7 +13,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
+from mmcv.parallel import MMDataParallel
+from projects.mmdet3d_plugin.core.parallel import MMDistributedDataParallel
 from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
                          Fp16OptimizerHook, OptimizerHook, build_optimizer,
                          build_runner, get_dist_info)
