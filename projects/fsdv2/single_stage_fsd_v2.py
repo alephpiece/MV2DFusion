@@ -49,7 +49,8 @@ class SingleStageFSDV2(SingleStage3DDetector):
                  test_cfg=None,
                  pretrained=None,
                  init_cfg=None,
-                 multiscale_cfg=None):
+                 multiscale_cfg=None,
+                 clip_raw_points=True):
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -105,6 +106,7 @@ class SingleStageFSDV2(SingleStage3DDetector):
 
         self.norm_eval = norm_eval
         self.freeze = freeze
+        self.clip_raw_points = clip_raw_points
 
     def init_weights(self) -> None:
         with native_sparse_checkpoint_loading(self):
@@ -204,9 +206,8 @@ class SingleStageFSDV2(SingleStage3DDetector):
 
         ori_pts = origin_dict['seg_points']
 
-        # add: 对原始点也进行裁剪
-        ori_pts[:, :3] = self.clip_points(ori_pts[:, :3], self.point_cloud_range)
-
+        if self.clip_raw_points:
+            ori_pts[:, :3] = self.clip_points(ori_pts[:, :3], self.point_cloud_range)
 
         ori_batch_idx = origin_dict['batch_idx']
         ori_pts_feat = origin_dict['seg_feats']

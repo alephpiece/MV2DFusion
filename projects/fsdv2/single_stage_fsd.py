@@ -169,10 +169,12 @@ class VoteSegmentor(Base3DSegmentor):
                  init_cfg=None,
                  pretrained=None,
                  tanh_dims=None,
+                 filter_invalid_points=False,
                  **extra_kwargs):
         super().__init__(init_cfg=init_cfg)
 
         self.voxel_layer = Voxelization(**voxel_layer)
+        self.filter_invalid_points = filter_invalid_points
 
         self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
         self.middle_encoder = builder.build_middle_encoder(middle_encoder)
@@ -277,6 +279,21 @@ class VoteSegmentor(Base3DSegmentor):
             out_points_list.append(out_points)
         return out_points_list
 
+    @torch.no_grad()
+    def filter_valid_points(self, points):
+        """Drop dynamic-voxelization sentinels before targets and VFE."""
+        valid_points = []
+        for sample, p in enumerate(points):
+            if len(p) == 0:
+                raise ValueError(f'FSD sample {sample} has no input points')
+            valid = (self.voxel_layer(p) >= 0).all(dim=1)
+            selected = p[valid]
+            if len(selected) == 0:
+                raise ValueError(
+                    f'FSD sample {sample} has no valid points after voxelization')
+            valid_points.append(selected)
+        return valid_points
+
     @force_fp32(apply_to='points')
     def forward_train(self,
                       points,
@@ -295,6 +312,9 @@ class VoteSegmentor(Base3DSegmentor):
         
         if self.voxel_downsampling_size is not None:
             points = self.voxel_downsample(points)
+
+        if self.filter_invalid_points:
+            points = self.filter_valid_points(points)
 
         labels, vote_targets, vote_mask = self.segmentation_head.get_targets(points, gt_bboxes_3d, gt_labels_3d)
 
@@ -355,6 +375,9 @@ class VoteSegmentor(Base3DSegmentor):
 
         if self.voxel_downsampling_size is not None:
             points = self.voxel_downsample(points)
+
+        if self.filter_invalid_points:
+            points = self.filter_valid_points(points)
 
         seg_pred = []
 
