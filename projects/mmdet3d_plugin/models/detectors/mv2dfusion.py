@@ -154,6 +154,7 @@ class MV2DFusion(MVXTwoStageDetector):
                  test_cfg=None,
                  debug=None,
                  point_image_overlap=False,
+                 batch_loss_logging=False,
                  ):
         self.dataset = dataset
         if pts_voxel_layer is not None:
@@ -209,11 +210,18 @@ class MV2DFusion(MVXTwoStageDetector):
         self.current_seq = 0
 
         self.debug = debug
+        self.batch_loss_logging = batch_loss_logging
         self.point_image_overlap = point_image_overlap
         self._point_worker = None
         self._point_stream = None
         self._point_future = None
         self._point_worker_failed = False
+
+    def _parse_losses(self, losses):
+        if self.batch_loss_logging:
+            from ...core.batched_loss_logging import batched_parse_losses
+            return batched_parse_losses(self, losses)
+        return super()._parse_losses(losses)
 
     def close_point_worker(self):
         """Release an idle worker, or stop accepting work after a failed step.
