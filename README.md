@@ -11,6 +11,8 @@ The rise of autonomous vehicles has significantly increased the demand for robus
 
 ## Preparation
 
+BW150/DTK and current CUDA configurations are documented in
+[Runtime profiles](docs/runtime-profiles.md).
 
 ### Environment
 - Linux
