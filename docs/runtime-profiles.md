@@ -47,5 +47,8 @@ The CUDA profile preserves the original online-validation default when
 
 Grouped optimizer checkpoints require the same parameter-group construction on
 resume. Older singleton-group optimizer states are not converted automatically;
-model-weight loading is independent of grouping. Existing MMCV scaler/iteration
-resume limitations are unchanged.
+model-weight loading is independent of grouping. FP16 resume restores the saved
+loss scaler through the registered optimizer hook and requires
+`meta.fp16.loss_scaler` in the checkpoint. Use `load_from` for model-only loading.
+Native checkpoint iteration counting and temporal/data-state restoration are
+unchanged.

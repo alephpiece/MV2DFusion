@@ -7,6 +7,7 @@
 #  Modified by Shihao Wang
 # ---------------------------------------------
 from contextlib import ExitStack
+from copy import deepcopy
 import random
 import warnings
 
@@ -34,6 +35,50 @@ from projects.mmdet3d_plugin.datasets import custom_build_dataset
 
 
 
+
+
+def _resume_with_fp16_scaler_state(runner, checkpoint):
+    """Restore scaler metadata for the FP16 optimizer hook's ``before_run``.
+
+    MMCV 1.6.1's IterBasedRunner restores weights and optimizer state without
+    passing the saved scaler metadata to the hook.
+    """
+    original_load_checkpoint = runner.load_checkpoint
+    had_instance_override = 'load_checkpoint' in vars(runner)
+    previous_instance_override = vars(runner).get('load_checkpoint')
+    captured_scalers = []
+
+    def capture_checkpoint(*args, **kwargs):
+        loaded_checkpoint = original_load_checkpoint(*args, **kwargs)
+        try:
+            scaler_state = loaded_checkpoint['meta']['fp16']['loss_scaler']
+        except (KeyError, TypeError) as error:
+            raise RuntimeError(
+                'FP16 resume checkpoint is missing meta.fp16.loss_scaler'
+            ) from error
+        if not isinstance(scaler_state, dict):
+            raise TypeError('FP16 loss_scaler checkpoint state must be a dict')
+
+        captured_scalers.append(deepcopy(scaler_state))
+        return loaded_checkpoint
+
+    runner.load_checkpoint = capture_checkpoint
+    try:
+        runner.resume(checkpoint)
+    finally:
+        if had_instance_override:
+            runner.load_checkpoint = previous_instance_override
+        else:
+            del runner.load_checkpoint
+
+    if len(captured_scalers) != 1:
+        raise RuntimeError(
+            'FP16 resume must load exactly one checkpoint, got '
+            f'{len(captured_scalers)}'
+        )
+    if runner.meta is None:
+        runner.meta = {}
+    runner.meta.setdefault('fp16', {})['loss_scaler'] = captured_scalers[0]
 
 
 def custom_train_detector(model,
@@ -246,7 +291,10 @@ def custom_train_detector(model,
         runner.register_hook(attention_precision_hook, priority='LOW')
 
     if cfg.resume_from:
-        runner.resume(cfg.resume_from)
+        if any(isinstance(hook, Fp16OptimizerHook) for hook in runner.hooks):
+            _resume_with_fp16_scaler_state(runner, cfg.resume_from)
+        else:
+            runner.resume(cfg.resume_from)
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
     if flash_backend is None:
